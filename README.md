@@ -82,6 +82,6 @@ mantil stage destroy development
 
 ## Final thoughts
 
-With this example you learned how to create a scheduled lambda function.
+With this example you learned how to create a scheduled lambda function. It also uses persistent key/value storage that you can learn more about in [todo example](https://github.com/mantil-io/example-todo).
 
 If you have any questions or comments on this template or would just like to share your view on Mantil contact us at [support@mantil.com](mailto:support@mantil.com).
