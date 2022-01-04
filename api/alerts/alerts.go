@@ -1,16 +1,12 @@
 package alerts
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"net/http"
+	"os"
 	"regexp"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/mantil-io/mantil.go"
 	"github.com/microcosm-cc/bluemonday"
@@ -19,10 +15,20 @@ import (
 const (
 	lastItemKey     = "last-item"
 	sentItemsPrefix = "sent-items"
-	apiBaseURL      = "https://hacker-news.firebaseio.com/v0/"
+	usernameEnv     = "HN_USER"
+)
+
+const (
+	NotificationTypeStoryWithKeywords = iota
+	NotificationTypeCommentWithKeywords
+	NotificationTypeUserComment
+	NotificationTypeCommentOnUserComment
+	NotificationTypeUserStory
+	NotificationTypeCommentOnUserStory
 )
 
 type Alerts struct {
+	api       *api
 	state     *mantil.KV
 	sanitizer *bluemonday.Policy
 }
@@ -33,60 +39,44 @@ func New() *Alerts {
 		log.Fatal(err)
 	}
 	return &Alerts{
+		api:       &api{},
 		state:     state,
 		sanitizer: bluemonday.StrictPolicy(),
 	}
 }
 
-type item struct {
-	ID      int    `json:"id"`
-	Type    string `json:"type,omitempty"`
-	Deleted bool   `json:"deleted,omitempty"`
-	Dead    bool   `json:"dead,omitempty"`
-	Title   string `json:"title,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Time    int64  `json:"time,omitempty"`
-	Parent  int    `json:"parent,omitempty"`
-}
-
-func (i *item) sentItemsKey() string {
-	return fmt.Sprintf("%s-%d", sentItemsPrefix, i.ID)
-}
-
 func (a *Alerts) Invoke() error {
 	lastItemID, err := a.lastItemID()
 	if err != nil {
+		log.Println(err)
 		return err
 	}
-	maxItemID, err := a.maxItemID()
+	maxItemID, err := a.api.maxItemID()
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 	if lastItemID == 0 {
 		lastItemID = maxItemID - 1000
 	}
-	timeCutoff := time.Now().Add(-10 * time.Minute)
 	for id := lastItemID + 1; id <= maxItemID; id++ {
-		i, err := a.getItem(id)
+		i, err := a.api.getItem(id)
 		if err != nil {
-			return err
-		}
-		if i.Dead || i.Deleted {
-			continue
-		}
-		if i.Time == 0 || time.Unix(i.Time, 0).Before(timeCutoff) {
-			continue
-		}
-		if !a.isCandidate(i) {
+			log.Println(err)
 			continue
 		}
 		if err := a.processItem(i); err != nil {
-			return err
+			log.Println(err)
+			continue
 		}
 	}
-	return a.state.Put(lastItemKey, &item{
+	if err := a.state.Put(lastItemKey, &item{
 		ID: maxItemID,
-	})
+	}); err != nil {
+		log.Println(err)
+		return err
+	}
+	return nil
 }
 
 func (a *Alerts) lastItemID() (int, error) {
@@ -101,64 +91,74 @@ func (a *Alerts) lastItemID() (int, error) {
 	return i.ID, nil
 }
 
-func (a *Alerts) maxItemID() (int, error) {
-	rsp, err := a.apiCall("maxitem")
-	if err != nil {
-		return 0, err
-	}
-	maxItem, err := strconv.Atoi(string(rsp))
-	if err != nil {
-		return 0, err
-	}
-	return maxItem, nil
-}
-
-func (a *Alerts) getItem(id int) (*item, error) {
-	path := fmt.Sprintf("item/%d", id)
-	buf, err := a.apiCall(path)
-	if err != nil {
-		return nil, err
-	}
-	i := &item{}
-	if err := json.Unmarshal(buf, i); err != nil {
-		return nil, err
-	}
-	return i, nil
-}
-
 func (a *Alerts) processItem(i *item) error {
-	if i.Type == "story" {
-		if a.isSent(i) {
-			return nil
-		}
-		return a.sendSlackNotification(i)
+	if i.Dead || i.Deleted {
+		return nil
 	}
-	if i.Type == "comment" {
-		parent, err := a.getItem(i.Parent)
-		if err != nil {
-			return err
-		}
-		return a.processItem(parent)
+	return a.processItemRecursive(i, i)
+}
+
+func (a *Alerts) processItemRecursive(i *item, root *item) error {
+	switch i.Type {
+	case "story":
+		return a.processStory(i, root)
+	case "comment":
+		return a.processComment(i, root)
 	}
 	return nil
 }
 
-func (a *Alerts) isSent(i *item) bool {
-	return a.state.Get(i.sentItemsKey(), i) == nil
+func (a *Alerts) processStory(s *item, root *item) error {
+	if a.isUserItem(s) && s.ID == root.ID {
+		if err := a.sendSlackNotification(s, root, s, NotificationTypeUserStory); err != nil {
+			return err
+		}
+	}
+	if a.isUserItem(s) && root.Type == "comment" {
+		if err := a.sendSlackNotification(s, root, root, NotificationTypeCommentOnUserStory); err != nil {
+			return err
+		}
+	}
+	if a.isUserItem(root) && root.Type == "comment" {
+		if err := a.sendSlackNotification(s, root, root, NotificationTypeUserComment); err != nil {
+			return err
+		}
+	}
+	if a.containsKeywords(s) {
+		if err := a.sendSlackNotification(s, root, s, NotificationTypeStoryWithKeywords); err != nil {
+			return err
+		}
+	} else if a.containsKeywords(root) {
+		if err := a.sendSlackNotification(s, root, s, NotificationTypeCommentWithKeywords); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (a *Alerts) apiCall(path string) ([]byte, error) {
-	url := fmt.Sprintf("%s/%s.json", apiBaseURL, path)
-	r, err := http.Get(url)
-	if err != nil {
-		return nil, err
+func (a *Alerts) processComment(c *item, root *item) error {
+	if a.isUserItem(c) && c.ID != root.ID {
+		if err := a.sendSlackNotification(c, root, root, NotificationTypeCommentOnUserComment); err != nil {
+			return err
+		}
 	}
-	defer r.Body.Close()
-	buf, err := ioutil.ReadAll(r.Body)
+	parent, err := a.api.getItem(c.Parent)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return buf, nil
+	return a.processItemRecursive(parent, root)
+}
+
+func (a *Alerts) isUserItem(i *item) bool {
+	u, ok := os.LookupEnv(usernameEnv)
+	if !ok {
+		return false
+	}
+	return u == i.By
+}
+
+func (a *Alerts) isSent(i *item) bool {
+	return a.state.Get(i.sentItemsKey(), i) == nil
 }
 
 func (a *Alerts) cleanText(t string) string {
@@ -172,13 +172,13 @@ func (a *Alerts) cleanText(t string) string {
 	return t
 }
 
-func (a *Alerts) isCandidate(i *item) bool {
+func (a *Alerts) containsKeywords(i *item) bool {
 	text := strings.TrimSpace(i.Title + " " + i.Text)
 	text = a.cleanText(text)
 	words := strings.Fields(text)
-	contains := func(terms []string) bool {
+	contains := func(keywords []string) bool {
 		for _, w := range words {
-			for _, t := range terms {
+			for _, t := range keywords {
 				if t == w {
 					return true
 				}
@@ -192,15 +192,46 @@ func (a *Alerts) isCandidate(i *item) bool {
 	return (containsLambda && containsGo) || containsServerless
 }
 
-func (a *Alerts) sendSlackNotification(i *item) error {
-	var text string
-	if i.Title != "" {
-		text = fmt.Sprintf("A new interesting story was posted on HackerNews:  <https://news.ycombinator.com/item?id=%d|%s>", i.ID, i.Title)
-	} else {
-		text = fmt.Sprintf("A new interesting story was posted on HackerNews:  https://news.ycombinator.com/item?id=%d", i.ID)
+func (a *Alerts) sendSlackNotification(i, root, dedupe *item, typ int) error {
+	if dedupe != nil && a.isSent(dedupe) {
+		return nil
 	}
+	text := notificationText(i, root, typ)
 	if err := postToSlack(text); err != nil {
 		return err
 	}
-	return a.state.Put(i.sentItemsKey(), i)
+	if dedupe != nil {
+		return a.state.Put(dedupe.sentItemsKey(), dedupe)
+	}
+	return nil
+}
+
+func notificationText(i, root *item, typ int) string {
+	switch typ {
+	case NotificationTypeStoryWithKeywords:
+		if i.Title != "" {
+			return fmt.Sprintf("A new interesting story was posted on HackerNews:  <https://news.ycombinator.com/item?id=%d|%s>", i.ID, i.Title)
+		} else {
+			return fmt.Sprintf("A new interesting story was posted on HackerNews:  https://news.ycombinator.com/item?id=%d", i.ID)
+		}
+	case NotificationTypeCommentWithKeywords:
+		if i.Title != "" {
+			return fmt.Sprintf("A new interesting <https://news.ycombinator.com/item?id=%d|comment> was posted on a story on HackerNews:  <https://news.ycombinator.com/item?id=%d|%s>", root.ID, i.ID, i.Title)
+		} else {
+			return fmt.Sprintf("A new interesting comment was posted on a story on HackerNews:  https://news.ycombinator.com/item?id=%d", i.ID)
+		}
+	case NotificationTypeUserComment:
+		return fmt.Sprintf("%s posted a <https://news.ycombinator.com/item?id=%d|comment> on a HackerNews <https://news.ycombinator.com/item?id=%d|story>.", root.By, root.ID, i.ID)
+	case NotificationTypeCommentOnUserComment:
+		return fmt.Sprintf("%s posted a <https://news.ycombinator.com/item?id=%d|comment> on %s's <https://news.ycombinator.com/item?id=%d|comment> on HackerNews.", root.By, root.ID, i.By, i.ID)
+	case NotificationTypeUserStory:
+		if i.Title != "" {
+			return fmt.Sprintf("%s posted a story on HackerNews: <https://news.ycombinator.com/item?id=%d|%s>", i.By, i.ID, i.Title)
+		} else {
+			return fmt.Sprintf("%s posted a <https://news.ycombinator.com/item?id=%d|story> on HackerNews.", i.By, i.ID)
+		}
+	case NotificationTypeCommentOnUserStory:
+		return fmt.Sprintf("%s posted a <https://news.ycombinator.com/item?id=%d|comment> on %s's <https://news.ycombinator.com/item?id=%d|story>  on HackerNews.", root.By, root.ID, i.By, i.ID)
+	}
+	return ""
 }

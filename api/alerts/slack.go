@@ -28,20 +28,20 @@ func postToSlack(text string) error {
 	}
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(buf))
 	if err != nil {
-		return fmt.Errorf("new request failed: %s", err)
+		return err
 	}
 	req.Header.Add("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: defaultTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %s", err)
+		return err
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("reading response failed: %s", err)
+		return err
 	}
 	if string(body) != "ok" {
 		return fmt.Errorf("non-ok response: %s", string(body))

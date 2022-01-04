@@ -20,3 +20,4 @@ project:
         cron: "* * * * ? *"
         env:
           SLACK_WEBHOOK: # add your slack webhook here
+          HN_USER: # add a HackerNews username here
