@@ -1,12 +1,20 @@
 ## About
 
-This example shows how to create a scheduled lambda function that will look for new HackerNews stories containing certain terms and send links to a slack channel.
+This example shows how to create a scheduled lambda function that will look for new HackerNews stories containing certain keywords and send links to a slack channel. It will also send notifications when a chosen user posts a comment/story or when someone comments on their comment/story.
 
 ## How it works
 
 Here we are using the official HackerNews API which is described [here](https://github.com/HackerNews/API). We will also make use of the mantil KV store to persist data about items we have already processed.
 
-When the function is invoked, it first fetches the ID of the [last processed item](api/alerts/alerts.go#L54) from the KV store and the ID of the [newest item](api/alerts/alerts.go#L61) from the HN API. For each item, it then checks if it contains certain terms. In this case, we are interested in stories that contain discussions about lambdas in go or general serverless topics. When such an item is found, we [traverse its parents](api/alerts/alerts.go#L83) until we find the associated story and send the link [to a slack channel](api/alerts/alerts.go#L134) via the provided webhook.
+When the function is invoked, it first fetches the ID of the [last processed item](api/alerts/alerts.go#L49) from the KV store and the ID of the [newest item](api/alerts/alerts.go#L54) from the HN API. For each item, it then checks if it contains certain keywords. In this case, we are interested in stories that contain discussions about lambdas in go or general serverless topics. When such an item is found, we [traverse its parents](api/alerts/alerts.go#L145) until we find the associated story and send the link [to a slack channel](api/alerts/alerts.go#L195) via the provided webhook.
+
+For user activity alerts, we check if each item is:
+- a story posted by the user
+- a comment on a story posted by the user
+- a comment posted by the user
+- a reply to a comment posted by the user
+
+For example, [here](api/alerts/alerts.go#L117) we check if the item is a comment on the user's story.
 
 ## Prerequisites
 
@@ -45,6 +53,19 @@ project:
           SLACK_WEBHOOK: # add your slack webhook here
 ```
 
+Here you can also choose a user to receive notifications for by setting the `HN_USER` variable:
+```
+project:
+  stages: 
+    - name: development
+      functions:
+      - name: alerts
+        cron: "* * * * ? *"
+        env:
+          SLACK_WEBHOOK: # add your slack webhook here
+          HN_USER: # add a HackerNews username here
+```
+
 You can also change the function's schedule by changing the `cron` field. For example, this config will result in the function being invoked every 5 minutes:
 ```
 project:
@@ -55,6 +76,7 @@ project:
         cron: "*/5 * * * ? *"
         env:
           SLACK_WEBHOOK: # add your slack webhook here
+          HN_USER: # add a HackerNews username here
 ```
 
 For more information refer to the [docs](https://github.com/mantil-io/mantil/blob/master/docs/api_configuration.md#scheduled-execution).
