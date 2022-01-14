@@ -1,4 +1,4 @@
-module github.com/mantil-io/go-mantil-template
+module github.com/mantil-io/example-hn-alerts
 
 go 1.16
 
