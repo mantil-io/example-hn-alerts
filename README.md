@@ -31,7 +31,7 @@ To deploy this application you will need an [AWS account](https://aws.amazon.com
 
 To locally create a new project from this example run:
 ```
-mantil new app --from https://github.com/mantil-io/hn-alerts
+mantil new app --from https://github.com/mantil-io/example-hn-alerts
 cd app
 ```
 
